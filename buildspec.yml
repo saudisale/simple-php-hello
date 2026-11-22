@@ -1,25 +1,43 @@
 version: 0.2
 
+env:
+  variables:
+    IMAGE_REPO_NAME: hello-php   # name of your ECR repository
+    CONTAINER_NAME: hello-php    # container name in your ECS task definition
+
 phases:
   install:
     runtime-versions:
       php: 8.3
+
   pre_build:
     commands:
-      - php --version
-      - echo "Checking syntax..."
-      - find . -name "*.php" -print0 | xargs -0 -n1 php -l
+      - echo "Checking syntax and running tests..."
+      - find . -name "*.php" -not -path "./vendor/*" -print0 | xargs -0 -n1 php -l
+      - php tests/test.php
+      - echo "Logging in to Amazon ECR..."
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPO_URI=$REGISTRY/$IMAGE_REPO_NAME
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REGISTRY
+      # Tag each image with the short commit ID (falls back to the build number)
+      - IMAGE_TAG=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c 1-7)
+      - IMAGE_TAG=${IMAGE_TAG:-build-$CODEBUILD_BUILD_NUMBER}
+
   build:
     commands:
-      - echo "Running tests..."
-      - php tests/test.php
-      - echo "Running the app..."
-      - php index.php
+      - echo "Building image $REPO_URI:$IMAGE_TAG"
+      - docker build -t $REPO_URI:latest -t $REPO_URI:$IMAGE_TAG .
+
   post_build:
     commands:
-      - echo "Build finished on $(date)"
+      - echo "Pushing image to ECR..."
+      - docker push $REPO_URI:$IMAGE_TAG
+      - docker push $REPO_URI:latest
+      # Used by CodePipeline's "Amazon ECS" deploy action to update the service
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPO_URI:$IMAGE_TAG" > imagedefinitions.json
+      - cat imagedefinitions.json
 
 artifacts:
   files:
-    - index.php
-  name: hello-php
+    - imagedefinitions.json
